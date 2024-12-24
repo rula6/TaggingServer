@@ -1,5 +1,7 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+import requests
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import pillow_avif
 from PIL import Image, UnidentifiedImageError
 import numpy as np
@@ -22,6 +24,14 @@ THRESHOLD = 0.4
 session = None
 top_tags = []
 sensitivities = {}
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
@@ -108,20 +118,17 @@ def sample_frames(video_path: str, num_frames: int = 10) -> list:
     return sampled_frames
 
 
-@app.post("/upload-file/")
-async def upload_file(file: UploadFile = File(...)):
+def process_files(content: bytes, extension: str):
     global session, top_tags, sensitivities
 
     try:
-        content = await file.read()
-        extension = file.filename.split(".")[-1].lower()
-
         if extension == "webp":
             # Handle WebP file
-            frames = sample_frames_from_webp(file)
-        elif extension in {"png", "jpg", "jpeg", "avif"}:
-            # Handle standard image
-            frames = [Image.open(io.BytesIO(content))]
+            with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_file.flush()
+                file = UploadFile(filename=tmp_file.name, file=tmp_file)
+                frames = sample_frames_from_webp(file)
         elif extension in {"mp4", "avi", "mov", "webm", "gif"}:
             # Handle video
             with tempfile.NamedTemporaryFile(delete=False) as tmp_video:
@@ -129,7 +136,8 @@ async def upload_file(file: UploadFile = File(...)):
                 video_path = tmp_video.name
             frames = sample_frames(video_path)
         else:
-            raise HTTPException(status_code=400, detail="Unsupported file format.")
+            # Handle standard image
+            frames = [Image.open(io.BytesIO(content))]
 
         # Get ONNX model input shape
         input_shape = session.get_inputs()[0].shape
@@ -160,13 +168,43 @@ async def upload_file(file: UploadFile = File(...)):
             )
         ]
 
-        tag_string = ", ".join(predicted_tags)
-        sorted_tags = sorted(aggregated_scores.items(), key=lambda x: x[1], reverse=True)
+        sorted_tags = sorted(
+            aggregated_scores.items(), key=lambda x: x[1], reverse=True
+        )
 
-        return JSONResponse(content={"tags": tag_string, "scores": sorted_tags})
+        return {"tags": predicted_tags, "scores": sorted_tags}
 
     except Exception as e:
-        return HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
+
+
+@app.post("/upload-file/")
+async def upload_file(file: UploadFile = File(...)):
+    content = await file.read()
+    extension = file.filename.split(".")[-1].lower()
+    return JSONResponse(content=process_files(content, extension))
+
+
+@app.post("/upload-from-url/")
+async def upload_from_url(url: str = Form(...)):
+    try:
+        # Download the file from the given URL
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.93 Safari/537.36",
+            "referer": url,
+        }
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            raise HTTPException(
+                status_code=400, detail="Failed to download file from URL."
+            )
+
+        # Determine file type from the URL or response headers
+        extension = url.split(".")[-1].lower()
+        return JSONResponse(content=process_files(response.content, extension))
+    except Exception as e:
+        print(url)
+        raise HTTPException(status_code=500, detail=f"Error processing URL: {str(e)}")
 
 
 if __name__ == "__main__":
