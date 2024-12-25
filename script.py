@@ -120,7 +120,7 @@ def sample_frames(video_path: str, num_frames: int = 10) -> list:
 
 def process_files(content: bytes, extension: str):
     global session, top_tags, sensitivities
-
+    extension = (extension or "").split("?")[0]
     try:
         if extension == "webp":
             # Handle WebP file
@@ -210,4 +210,4 @@ async def upload_from_url(url: str = Form(...)):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_graceful_shutdown=20)
